@@ -1,0 +1,85 @@
+import pandas as pd
+import numpy as np
+from scipy.stats import entropy, ks_2samp, wasserstein_distance
+import warnings
+warnings.filterwarnings("ignore")
+
+np.random.seed(42)
+
+Загрузка данных
+df = pd.read_excel("CV Oil Test.xlsx")
+train_columns = [col for col in df.columns if "Train" in col]
+
+best_synthetic_data = {}
+best_comparison_metrics = []
+
+def moving_block_bootstrap(series, block_size, target_length):
+    blocks = [series[i:i + block_size] for i in range(len(series) - block_size + 1)]
+    blocks = np.array(blocks)
+    num_blocks = int(np.ceil(target_length / block_size))
+    indices = np.random.randint(0, len(blocks), size=num_blocks)
+    selected = blocks[indices]
+    return np.concatenate(selected)[:target_length]
+
+Поиск оптимального размера блока для каждого фолда
+for col in train_columns:
+    series = df[col].dropna().values
+    n = len(series)
+
+    best_score = np.inf
+    best_block = None
+    best_syn = None
+    best_metrics = None
+
+    for block_size in range(5, 21):
+        try:
+            syn = moving_block_bootstrap(series, block_size, n)
+
+            # Метрики
+            real_hist, bins = np.histogram(series, bins=50, density=True)
+            syn_hist, _ = np.histogram(syn, bins=bins, density=True)
+
+            kl = entropy(real_hist + 1e-8, syn_hist + 1e-8)
+            ks, _ = ks_2samp(series, syn)
+            w = wasserstein_distance(series, syn)
+
+            score = (kl + ks + w) / 3
+
+            if score < best_score:
+                best_score = score
+                best_block = block_size
+                best_syn = syn
+                best_metrics = (kl, ks, w)
+
+        except:
+            continue
+
+    syn_col = col.replace("Train", "MBB_OPT")
+    best_synthetic_data[syn_col] = best_syn
+
+    best_comparison_metrics.append({
+        "Fold": col,
+        "Best block size": best_block,
+        "KL-дивергенция": best_metrics[0],
+        "KS-статистика": best_metrics[1],
+        "Wasserstein-дист.": best_metrics[2],
+        "Средний Score": best_score
+    })
+
+Сохранение синтетики в длинном формате
+synthetic_long = []
+for col, values in best_synthetic_data.items():
+    for i, v in enumerate(values):
+        synthetic_long.append({
+            "Fold": col,
+            "Index": i,
+            "Value": v
+        })
+
+synthetic_df = pd.DataFrame(synthetic_long)
+synthetic_df.to_excel("CV_Oil_Synthetic_MBB_Optimized_Long.xlsx", index=False)
+
+Сохранение метрик
+metrics_df = pd.DataFrame(best_comparison_metrics)
+print(metrics_df.to_string(index=False))
+metrics_df.to_excel("CV_Oil_Synthetic_MBB_Optimized_Metrics.xlsx", index=False)
