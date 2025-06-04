@@ -1,0 +1,73 @@
+import pandas as pd
+import numpy as np
+from statsmodels.tsa.arima.model import ARIMA
+from scipy.stats import entropy, ks_2samp, wasserstein_distance
+import warnings
+warnings.filterwarnings("ignore")
+
+Загрузка данных
+df = pd.read_excel("CV Oil Test.xlsx")
+train_columns = [col for col in df.columns if "Train" in col]
+
+synthetic_data = {}
+comparison_metrics = []
+
+Ограниченные диапазоны для ARIMA параметров
+p_range = range(0, 4)
+d_range = range(0, 3)
+q_range = range(0, 4)
+
+Генерация синтетических рядов
+for col in train_columns:
+    series = df[col].dropna()
+    n = len(series)
+
+    best_aic = np.inf
+    best_order = None
+    best_model = None
+
+    Подбор лучшей ARIMA модели
+    for p in p_range:
+        for d in d_range:
+            for q in q_range:
+                try:
+                    model = ARIMA(series, order=(p, d, q))
+                    model_fit = model.fit()
+                    if model_fit.aic < best_aic:
+                        best_aic = model_fit.aic
+                        best_order = (p, d, q)
+                        best_model = model_fit
+                except:
+                    continue
+
+    # Прогноз по лучшей модели
+    forecast = best_model.predict(start=0, end=n - 1)
+    syn_col = col.replace("Train", "ARIMA")
+    synthetic_data[syn_col] = forecast
+
+    # --- Метрики сравнения ---
+    real = series.values
+    synthetic = forecast.values[:len(real)]
+
+    real_hist, bins = np.histogram(real, bins=50, density=True)
+    synthetic_hist, _ = np.histogram(synthetic, bins=bins, density=True)
+
+    kl_div = entropy(real_hist + 1e-8, synthetic_hist + 1e-8)
+    ks_stat, _ = ks_2samp(real, synthetic)
+    w_dist = wasserstein_distance(real, synthetic)
+
+    comparison_metrics.append({
+        "Fold": col,
+        "ARIMA(p,d,q)": str(best_order),
+        "KL-дивергенция": kl_div,
+        "KS-статистика": ks_stat,
+        "Wasserstein-дист.": w_dist
+    })
+
+Сохранение результатов 
+synthetic_df = pd.DataFrame(synthetic_data)
+synthetic_df.to_excel("CV_Oil_Synthetic_ARIMA.xlsx", index=False)
+
+metrics_df = pd.DataFrame(comparison_metrics)
+print(metrics_df.to_string(index=False))
+metrics_df.to_excel("CV_Oil_Synthetic_ARIMA_Metrics.xlsx", index=False)
