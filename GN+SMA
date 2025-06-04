@@ -10,7 +10,7 @@ noise_scale_factor = 0.05  # Шум как доля std
 sma_window = 5             # Окно сглаживания
 
 Загрузка данных
-df = pd.read_excel("CV Oil Test.xlsx")
+df = pd.read_excel()
 train_columns = [col for col in df.columns if "Train" in col]
 
 synthetic_data = {}
