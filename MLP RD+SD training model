@@ -1,0 +1,168 @@
+import pandas as pd
+import numpy as np
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, confusion_matrix, roc_curve
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, Input
+from tensorflow.keras.optimizers import Adam
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore")
+
+history_window = 30
+horizon = 5
+threshold = 0.05
+file_path = ' '  
+df = pd.read_excel(file_path)
+print("Колонки:", df.columns)
+
+results = []
+fold_histories = []
+roc_curves = []
+
+for fold in range(1, 6):
+    synthetic_col = f"Fold {fold} TimeGAN"
+    train_col = f"Fold {fold} Train"
+    test_col = f"Fold {fold} Test"
+    if (train_col not in df.columns or
+        test_col not in df.columns or
+        synthetic_col not in df.columns):
+        print(f"Пропускаю Fold {fold} (нет нужных столбцов)")
+        continue
+
+    Претрейн на синтетике
+    synthetic_series = df[synthetic_col].dropna().values
+    X_pretrain, y_pretrain = [], []
+    for t in range(0, len(synthetic_series) - history_window - horizon + 1, horizon):
+        window = synthetic_series[t : t + history_window + 1]
+        X_feat = np.diff(window) / window[:-1]
+        base_price = synthetic_series[t + history_window - 1]
+        future_window = synthetic_series[t + history_window : t + history_window + horizon]
+        max_move = np.max(np.abs(future_window - base_price) / base_price)
+        y_target = int(max_move >= threshold)
+        X_pretrain.append(X_feat)
+        y_pretrain.append(y_target)
+    X_pretrain = np.array(X_pretrain)
+    y_pretrain = np.array(y_pretrain)
+
+    Реальный трейновый ряд
+    train_series = df[train_col].dropna().values
+    X_train, y_train = [], []
+    for t in range(0, len(train_series) - history_window - horizon + 1, horizon):
+        window = train_series[t : t + history_window + 1]
+        X_feat = np.diff(window) / window[:-1]
+        base_price = train_series[t + history_window - 1]
+        future_window = train_series[t + history_window : t + history_window + horizon]
+        max_move = np.max(np.abs(future_window - base_price) / base_price)
+        y_target = int(max_move >= threshold)
+        X_train.append(X_feat)
+        y_train.append(y_target)
+    X_train = np.array(X_train)
+    y_train = np.array(y_train)
+
+    Сплит трейна на train/val
+    X_tr, X_val, y_tr, y_val = train_test_split(
+        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
+    )
+
+    Тест
+    test_series = df[test_col].dropna().values
+    X_test, y_test = [], []
+    for t in range(0, len(test_series) - history_window - horizon + 1, horizon):
+        window = test_series[t : t + history_window + 1]
+        X_feat = np.diff(window) / window[:-1]
+        base_price = test_series[t + history_window - 1]
+        future_window = test_series[t + history_window : t + history_window + horizon]
+        max_move = np.max(np.abs(future_window - base_price) / base_price)
+        y_target = int(max_move >= threshold)
+        X_test.append(X_feat)
+        y_test.append(y_target)
+    X_test = np.array(X_test)
+    y_test = np.array(y_test)
+
+    # === Class weight ===
+    p1 = (y_tr == 1).sum()
+    p0 = (y_tr == 0).sum()
+    class_weight = {0: 1, 1: (p0 / p1) if p1 > 0 else 1}
+
+    tf.keras.backend.clear_session()
+    model = Sequential([
+        Input(shape=(history_window,)),
+        Dense(128, activation='relu'),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(64, activation='relu'),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(1, activation='sigmoid')
+    ])
+    model.compile(optimizer=Adam(0.001), loss='binary_crossentropy', metrics=['accuracy'])
+
+    Претрейн
+    print(f"\nFold {fold}: Pretraining on {synthetic_col} ...")
+    if len(X_pretrain) > 0:
+        model.fit(
+            X_pretrain, y_pretrain, epochs=20, batch_size=8, verbose=0
+        )
+    else:
+        print(f"Внимание: нет синтетических примеров для претрейна в Fold {fold}")
+
+    Файнтюн
+    print(f"Fold {fold}: Fine-tune on {train_col} ...")
+    history = model.fit(
+        X_tr, y_tr, epochs=40, batch_size=8, verbose=0,
+        class_weight=class_weight, validation_data=(X_val, y_val)
+    )
+
+    y_pred_prob = model.predict(X_test, verbose=0).flatten()
+    y_pred = (y_pred_prob >= 0.5).astype(int)
+    acc = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+    try:
+        roc = roc_auc_score(y_test, y_pred_prob)
+    except:
+        roc = np.nan
+    cm = confusion_matrix(y_test, y_pred)
+    extremum_pct = np.mean(y_test)*100
+
+    results.append([
+        fold, acc, f1, roc, extremum_pct, len(y_test), cm.tolist()
+    ])
+    fold_histories.append(history)
+    fpr, tpr, _ = roc_curve(y_test, y_pred_prob)
+    roc_curves.append((fpr, tpr, roc))
+
+Таблица метрик по фолдам
+res_df = pd.DataFrame(results, columns=[
+    'Fold', 'Accuracy', 'F1-score', 'ROC AUC', 'Экстр (%)', 'Кол-во', 'ConfMat'
+])
+print(res_df.to_string(index=False))
+
+Визуализация для каждого фолда
+for i in range(len(results)):
+    fold = results[i][0]
+    history = fold_histories[i]
+    fpr, tpr, roc = roc_curves[i]
+    epochs = range(1, len(history.history['loss'])+1)
+    fig, axs = plt.subplots(1, 2, figsize=(12,4))
+
+    ax1 = axs[0]
+    ax1.plot(epochs, history.history['loss'], color='blue', label='Train Loss')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Train Loss', color='blue')
+    ax2 = ax1.twinx()
+    ax2.plot(epochs, history.history['accuracy'], color='green', label='Train Accuracy')
+    ax2.set_ylabel('Train Accuracy', color='green')
+    ax1.set_title(f'Fold {fold} - Train Loss & Accuracy')
+    ax1.legend(loc='upper left')
+    ax2.legend(loc='upper right')
+
+    axs[1].plot(fpr, tpr, label=f'ROC AUC={roc:.3f}')
+    axs[1].plot([0, 1], [0, 1], linestyle='--')
+    axs[1].set_xlabel('FPR')
+    axs[1].set_ylabel('TPR')
+    axs[1].set_title(f'Fold {fold} - ROC Curve')
+    axs[1].legend()
+    plt.tight_layout()
+    plt.show()
