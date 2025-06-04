@@ -1,0 +1,98 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.graphics.tsaplots import plot_acf
+from scipy.fft import fft, fftfreq
+from sklearn.manifold import TSNE
+
+Загрузка данных
+df = pd.read_excel()
+
+columns = {
+}
+
+1. Сравнение фрагментов рядов
+plt.figure(figsize=(16,6))
+for label, col in columns.items():
+    plt.plot(df[col][:300], label=label, alpha=0.7)
+plt.title("Сравнение фрагментов временных рядов (первые 300 точек)")
+plt.legend()
+plt.show()
+
+2. Автокорреляционные функции
+fig, axes = plt.subplots(2, 3, figsize=(18,8))
+for ax, (label, col) in zip(axes.flatten(), columns.items()):
+    plot_acf(df[col].dropna(), lags=50, ax=ax)
+    ax.set_title(f"ACF: {label}")
+plt.tight_layout()
+plt.show()
+
+3. Спектральный анализ (БПФ)
+def plot_fft(series, label):
+    N = len(series)
+    yf = np.abs(fft(series - np.mean(series)))
+    xf = fftfreq(N, 1)[:N//2]
+    plt.plot(xf, yf[:N//2], label=label)
+
+plt.figure(figsize=(12,6))
+for label, col in columns.items():
+    plot_fft(df[col].dropna().values, label)
+plt.title('Амплитудный спектр (БПФ)')
+plt.xlabel('Частота')
+plt.ylabel('Амплитуда')
+plt.legend()
+plt.xlim([0, 0.2])
+plt.show()
+
+4. Распределение экстремумов
+def count_extremes(series, threshold=0.05, window=30, horizon=5):
+    extremes = []
+    for i in range(len(series) - window - horizon + 1):
+        base = series[i+window-1]
+        future = series[i+window:i+window+horizon]
+        if len(future) < 1:
+            continue
+        max_move = np.max(np.abs(future - base) / base)
+        extremes.append(int(max_move > threshold))
+    return np.array(extremes)
+
+extremes_count = [np.sum(count_extremes(df[col].dropna().values)) for col in columns.values()]
+
+plt.figure(figsize=(10,5))
+plt.bar(columns.keys(), extremes_count)
+plt.title('Количество экстремумов (горизонт=5, окно=30, порог=5%)')
+plt.ylabel('Экстремумов')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+5. t-SNE сравнение окон
+def make_windows(series, window=30):
+    X = []
+    for i in range(len(series) - window + 1):
+        X.append(series[i:i+window])
+    return np.array(X)
+
+windowed_data = []
+labels = []
+N = 500  # количество окон каждого типа
+
+for label, col in columns.items():
+    windows = make_windows(df[col].dropna().values)
+    windowed_data.append(windows[:N])
+    labels.extend([label] * min(N, len(windows)))
+
+X_all = np.vstack(windowed_data)
+tsne = TSNE(n_components=2, perplexity=30, random_state=42)
+X_tsne = tsne.fit_transform(X_all)
+
+plt.figure(figsize=(10,8))
+unique_labels = list(columns.keys())
+colors = ['black', 'blue', 'red', 'green', 'orange', 'purple']
+for l, c in zip(unique_labels, colors):
+    idx = np.array(labels) == l
+    plt.scatter(X_tsne[idx, 0], X_tsne[idx, 1], label=l, alpha=0.6, s=20, c=c)
+plt.legend()
+plt.title("t-SNE 'окон' из разных источников")
+plt.tight_layout()
+plt.show()
