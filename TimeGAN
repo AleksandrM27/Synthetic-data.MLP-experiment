@@ -1,0 +1,145 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras import layers, models, optimizers
+from scipy.stats import entropy, ks_2samp, wasserstein_distance
+import matplotlib.pyplot as plt
+
+# ==== Исходные данные ====
+data_raw = np.array([], 
+        dtype=np.float32)
+
+Нормализация
+data_min, data_max = data_raw.min(), data_raw.max()
+data = (data_raw - data_min) / (data_max - data_min)
+data = data.reshape(1, -1, 1)
+
+Параметры
+seq_len = data.shape[1]
+z_dim = 8
+hidden_dim = 16
+epochs = 200
+batch_size = 1
+
+RNN билдер
+def make_rnn(input_dim, output_dim, return_seq=True):
+    model = models.Sequential()
+    model.add(layers.Input(shape=(seq_len, input_dim)))
+    model.add(layers.GRU(hidden_dim, return_sequences=return_seq))
+    if return_seq:
+        model.add(layers.TimeDistributed(layers.Dense(output_dim, activation="sigmoid")))
+    else:
+        model.add(layers.Dense(output_dim, activation="sigmoid"))
+    return model
+
+Архитектура TimeGAN
+embedder = make_rnn(1, hidden_dim)
+recovery = make_rnn(hidden_dim, 1)
+generator = make_rnn(z_dim, hidden_dim)
+supervisor = make_rnn(hidden_dim, hidden_dim)
+discriminator = make_rnn(hidden_dim, 1, return_seq=False)
+
+Предобучение: оптимизаторы
+embedder_opt = optimizers.Adam(0.01)
+supervisor_opt = optimizers.Adam(0.01)
+mse = tf.keras.losses.MeanSquaredError()
+
+@tf.function
+def train_embedder(x):
+    with tf.GradientTape() as tape:
+        h = embedder(x)
+        x_tilde = recovery(h)
+        loss = mse(x, x_tilde)
+    grads = tape.gradient(loss, embedder.trainable_variables + recovery.trainable_variables)
+    embedder_opt.apply_gradients(zip(grads, embedder.trainable_variables + recovery.trainable_variables))
+    return loss
+
+@tf.function
+def train_supervisor(x):
+    with tf.GradientTape() as tape:
+        h = embedder(x)
+        h_hat = supervisor(h)
+        loss = mse(h[:, 1:], h_hat[:, :-1])
+    grads = tape.gradient(loss, supervisor.trainable_variables)
+    supervisor_opt.apply_gradients(zip(grads, supervisor.trainable_variables))
+    return loss
+
+Предобучение
+print("Pretraining...")
+for epoch in range(100):
+    e_loss = train_embedder(tf.convert_to_tensor(data, dtype=tf.float32))
+    s_loss = train_supervisor(tf.convert_to_tensor(data, dtype=tf.float32))
+    if epoch % 50 == 0 or epoch == 99:
+        print(f"Epoch {epoch}: Embedder Loss = {e_loss.numpy():.4f}, Supervisor Loss = {s_loss.numpy():.4f}")
+
+Основное обучение: новые оптимизаторы
+gen_opt = optimizers.Adam(0.01)
+disc_opt = optimizers.Adam(0.01)
+embedder_opt = optimizers.Adam(0.01)  # обновленный
+
+@tf.function
+def train_joint(x):
+    z = tf.random.normal([batch_size, seq_len, z_dim])
+    with tf.GradientTape(persistent=True) as tape:
+        h = embedder(x)
+        h_hat_sup = supervisor(h)
+        x_tilde = recovery(h)
+
+        e_hat = generator(z)
+        h_hat_fake = supervisor(e_hat)
+
+        y_real = discriminator(h_hat_sup)
+        y_fake = discriminator(h_hat_fake)
+
+        d_loss = tf.reduce_mean(y_fake) - tf.reduce_mean(y_real)
+        g_loss = mse(h[:, 1:], h_hat_fake[:, :-1]) - tf.reduce_mean(y_fake)
+        e_loss = mse(x, x_tilde)
+
+    g_vars = generator.trainable_variables + supervisor.trainable_variables
+    d_vars = discriminator.trainable_variables
+    e_vars = embedder.trainable_variables + recovery.trainable_variables
+
+    g_grads = tape.gradient(g_loss, g_vars)
+    d_grads = tape.gradient(d_loss, d_vars)
+    e_grads = tape.gradient(e_loss, e_vars)
+
+    gen_opt.apply_gradients(zip(g_grads, g_vars))
+    disc_opt.apply_gradients(zip(d_grads, d_vars))
+    embedder_opt.apply_gradients(zip(e_grads, e_vars))
+
+    return g_loss, d_loss, e_loss
+
+Обучение
+print("\nTraining...")
+for epoch in range(epochs):
+    g, d, e = train_joint(tf.convert_to_tensor(data, dtype=tf.float32))
+    if epoch % 50 == 0 or epoch == epochs - 1:
+        print(f"Epoch {epoch}: G={g.numpy():.4f}, D={d.numpy():.4f}, E={e.numpy():.4f}")
+print("Done.\n")
+
+Генерация
+z = tf.random.normal([1, seq_len, z_dim])
+e_hat = generator(z)
+h_hat = supervisor(e_hat)
+synthetic = recovery(h_hat).numpy().reshape(-1)
+synthetic_denorm = synthetic * (data_max - data_min) + data_min
+real_denorm = data_raw
+
+Метрики
+def compute_metrics(p, q):
+    hist_p, _ = np.histogram(p, bins=10, density=True)
+    hist_q, _ = np.histogram(q, bins=10, density=True)
+    kl = entropy(hist_p + 1e-8, hist_q + 1e-8)
+    ks, _ = ks_2samp(p, q)
+    wd = wasserstein_distance(p, q)
+    return kl, ks, wd
+
+kl, ks, wd = compute_metrics(real_denorm, synthetic_denorm)
+
+Визуализация
+plt.plot(real_denorm, label="Real")
+plt.plot(synthetic_denorm, label="Synthetic", linestyle="--")
+plt.title("Minimal TimeGAN (10 точек)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
