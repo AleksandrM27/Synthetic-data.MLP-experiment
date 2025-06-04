@@ -1,0 +1,67 @@
+import pandas as pd
+import numpy as np
+from scipy.stats import entropy, ks_2samp, wasserstein_distance
+import warnings
+warnings.filterwarnings("ignore")
+
+Настройки
+np.random.seed(42)
+noise_scale_factor = 0.05  # Шум как доля std
+sma_window = 5             # Окно сглаживания
+
+Загрузка данных
+df = pd.read_excel("CV Oil Test.xlsx")
+train_columns = [col for col in df.columns if "Train" in col]
+
+synthetic_data = {}
+comparison_metrics = []
+
+Генерация и анализ
+for col in train_columns:
+    series = df[col].dropna().values
+    n = len(series)
+
+    Добавление гауссовского шума
+    sigma = np.std(series) * noise_scale_factor
+    noise = np.random.normal(0, sigma, size=n)
+    noisy_series = series + noise
+
+    Применение скользящего среднего
+    smoothed = pd.Series(noisy_series).rolling(window=sma_window, min_periods=1, center=True).mean().values
+    syn_col = col.replace("Train", "GN_SMA")
+    synthetic_data[syn_col] = smoothed[:n]  # На всякий случай усечём
+
+    Метрики
+    real_hist, bins = np.histogram(series, bins=50, density=True)
+    synthetic_hist, _ = np.histogram(smoothed, bins=bins, density=True)
+
+    kl_div = entropy(real_hist + 1e-8, synthetic_hist + 1e-8)
+    ks_stat, _ = ks_2samp(series, smoothed)
+    w_dist = wasserstein_distance(series, smoothed)
+
+    comparison_metrics.append({
+        "Fold": col,
+        "Noise scale": noise_scale_factor,
+        "SMA window": sma_window,
+        "KL-дивергенция": kl_div,
+        "KS-статистика": ks_stat,
+        "Wasserstein-дист.": w_dist
+    })
+
+Сохранение синтетики
+synthetic_long = []
+for col, values in synthetic_data.items():
+    for i, v in enumerate(values):
+        synthetic_long.append({
+            "Fold": col,
+            "Index": i,
+            "Value": v
+        })
+
+synthetic_df = pd.DataFrame(synthetic_long)
+synthetic_df.to_excel("CV_Oil_Synthetic_GN_SMA_Long.xlsx", index=False)
+
+Сохранение метрик
+metrics_df = pd.DataFrame(comparison_metrics)
+print(metrics_df.to_string(index=False))
+metrics_df.to_excel("CV_Oil_Synthetic_GN_SMA_Metrics.xlsx", index=False)
